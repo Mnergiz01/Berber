@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import { supabase } from '../supabase'
 
 const emit = defineEmits(['login-success'])
 
@@ -12,11 +13,7 @@ const loginForm = ref({
 const loading = ref(false)
 const error = ref('')
 
-// Sabit admin bilgileri
-const ADMIN_USERNAME = 'admin'
-const ADMIN_PASSWORD = '123'
-
-// Login işlemi
+// Çalışan girişi
 const handleLogin = async () => {
   if (!loginForm.value.username || !loginForm.value.password) {
     error.value = 'Lütfen tüm alanları doldurun!'
@@ -27,19 +24,24 @@ const handleLogin = async () => {
     loading.value = true
     error.value = ''
 
-    // Basit kullanıcı adı ve şifre kontrolü
-    if (loginForm.value.username === ADMIN_USERNAME && loginForm.value.password === ADMIN_PASSWORD) {
-      // Admin bilgilerini localStorage'a kaydet
-      localStorage.setItem('isAdmin', 'true')
-      localStorage.setItem('adminUser', JSON.stringify({
-        full_name: 'Admin',
-        username: ADMIN_USERNAME
-      }))
+    // Çalışan bilgilerini kontrol et
+    const { data: employee, error: dbError } = await supabase
+      .from('employees')
+      .select('*')
+      .eq('username', loginForm.value.username)
+      .eq('password', loginForm.value.password)
+      .eq('is_active', true)
+      .single()
 
-      emit('login-success')
-    } else {
+    if (dbError || !employee) {
       throw new Error('Kullanıcı adı veya şifre hatalı!')
     }
+
+    // Çalışan bilgilerini localStorage'a kaydet
+    localStorage.setItem('isEmployee', 'true')
+    localStorage.setItem('employeeUser', JSON.stringify(employee))
+
+    emit('login-success')
   } catch (err) {
     error.value = err.message
     loginForm.value.password = ''
@@ -47,21 +49,20 @@ const handleLogin = async () => {
     loading.value = false
   }
 }
-
 </script>
 
 <template>
-  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-purple-50 to-pink-100 p-4">
     <div class="bg-white rounded-lg shadow-xl p-8 w-full max-w-md">
       <!-- Header -->
       <div class="text-center mb-8">
-        <div class="bg-indigo-600 rounded-full w-20 h-20 flex items-center justify-center mx-auto mb-4">
+        <div class="bg-gradient-to-r from-purple-600 to-pink-600 rounded-full w-20 h-20 flex items-center justify-center mx-auto mb-4">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
           </svg>
         </div>
-        <h2 class="text-3xl font-bold text-gray-900">Yönetici Girişi</h2>
-        <p class="text-gray-600 mt-2">Randevuları yönetmek için giriş yapın</p>
+        <h2 class="text-3xl font-bold text-gray-900">Çalışan Girişi</h2>
+        <p class="text-gray-600 mt-2">Randevularınızı yönetmek için giriş yapın</p>
       </div>
 
       <!-- Error Message -->
@@ -79,9 +80,9 @@ const handleLogin = async () => {
             id="username"
             v-model="loginForm.username"
             type="text"
-            placeholder="admin"
+            placeholder="kullanıcı adınız"
             required
-            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
             autocomplete="username"
           />
         </div>
@@ -96,7 +97,7 @@ const handleLogin = async () => {
             type="password"
             placeholder="••••••••"
             required
-            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
             autocomplete="current-password"
           />
         </div>
@@ -104,7 +105,7 @@ const handleLogin = async () => {
         <button
           type="submit"
           :disabled="loading"
-          class="w-full bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          class="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-lg hover:from-purple-700 hover:to-pink-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <span v-if="loading">Giriş Yapılıyor...</span>
           <span v-else>Giriş Yap</span>
@@ -116,7 +117,7 @@ const handleLogin = async () => {
         <div class="pt-3 border-t">
           <p class="text-sm text-gray-600">
             Müşteri misiniz?
-            <a href="/" class="text-indigo-600 hover:text-indigo-700 font-medium">Randevu almak için tıklayın</a>
+            <a href="/" class="text-purple-600 hover:text-purple-700 font-medium">Randevu almak için tıklayın</a>
           </p>
         </div>
       </div>

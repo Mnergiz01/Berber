@@ -14,6 +14,9 @@ const employeeForm = ref({
   specialty: '',
   phone: '',
   email: '',
+  username: '',
+  password: '',
+  photoUrl: '',
   workStartTime: '09:00',
   workEndTime: '19:00',
   bio: '',
@@ -73,6 +76,9 @@ const startAdd = () => {
     specialty: '',
     phone: '',
     email: '',
+    username: '',
+    password: '',
+    photoUrl: '',
     workStartTime: '09:00',
     workEndTime: '19:00',
     bio: '',
@@ -87,6 +93,9 @@ const startEdit = (employee) => {
     specialty: employee.specialty || '',
     phone: employee.phone || '',
     email: employee.email || '',
+    username: employee.username || '',
+    password: '', // Şifre alanını boş bırak (sadece değiştirmek istenirse doldurulur)
+    photoUrl: employee.photo_url || '',
     workStartTime: employee.work_start_time || '09:00',
     workEndTime: employee.work_end_time || '19:00',
     bio: employee.bio || '',
@@ -102,6 +111,9 @@ const cancelEdit = () => {
     specialty: '',
     phone: '',
     email: '',
+    username: '',
+    password: '',
+    photoUrl: '',
     workStartTime: '09:00',
     workEndTime: '19:00',
     bio: '',
@@ -116,6 +128,16 @@ const saveEmployee = async () => {
       return
     }
 
+    if (isAddingNew.value && !employeeForm.value.username) {
+      alert('Lütfen kullanıcı adı girin!')
+      return
+    }
+
+    if (isAddingNew.value && !employeeForm.value.password) {
+      alert('Lütfen şifre girin!')
+      return
+    }
+
     let employeeId
 
     if (isAddingNew.value) {
@@ -127,6 +149,9 @@ const saveEmployee = async () => {
           specialty: employeeForm.value.specialty,
           phone: employeeForm.value.phone,
           email: employeeForm.value.email,
+          username: employeeForm.value.username,
+          password: employeeForm.value.password,
+          photo_url: employeeForm.value.photoUrl || null,
           work_start_time: employeeForm.value.workStartTime,
           work_end_time: employeeForm.value.workEndTime,
           bio: employeeForm.value.bio,
@@ -140,17 +165,26 @@ const saveEmployee = async () => {
       alert('Çalışan başarıyla eklendi!')
     } else {
       // Mevcut çalışanı güncelle
+      const updateData = {
+        name: employeeForm.value.name,
+        specialty: employeeForm.value.specialty,
+        phone: employeeForm.value.phone,
+        email: employeeForm.value.email,
+        username: employeeForm.value.username,
+        photo_url: employeeForm.value.photoUrl || null,
+        work_start_time: employeeForm.value.workStartTime,
+        work_end_time: employeeForm.value.workEndTime,
+        bio: employeeForm.value.bio
+      }
+
+      // Şifre doldurulmuşsa güncelle
+      if (employeeForm.value.password) {
+        updateData.password = employeeForm.value.password
+      }
+
       const { error: updateError } = await supabase
         .from('employees')
-        .update({
-          name: employeeForm.value.name,
-          specialty: employeeForm.value.specialty,
-          phone: employeeForm.value.phone,
-          email: employeeForm.value.email,
-          work_start_time: employeeForm.value.workStartTime,
-          work_end_time: employeeForm.value.workEndTime,
-          bio: employeeForm.value.bio
-        })
+        .update(updateData)
         .eq('id', editingEmployee.value)
 
       if (updateError) throw updateError
@@ -290,6 +324,34 @@ const getServiceName = (serviceId) => {
           />
         </div>
         <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Kullanıcı Adı *</label>
+          <input
+            v-model="employeeForm.username"
+            type="text"
+            placeholder="Giriş için kullanıcı adı"
+            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+          />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Şifre *</label>
+          <input
+            v-model="employeeForm.password"
+            type="password"
+            placeholder="Giriş için şifre"
+            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+          />
+        </div>
+        <div class="md:col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-2">Fotoğraf URL'si</label>
+          <input
+            v-model="employeeForm.photoUrl"
+            type="url"
+            placeholder="https://example.com/photo.jpg"
+            class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+          />
+          <p class="text-xs text-gray-500 mt-1">Fotoğrafın internet adresini girin (opsiyonel)</p>
+        </div>
+        <div>
           <label class="block text-sm font-medium text-gray-700 mb-2">Başlangıç Saati</label>
           <input
             v-model="employeeForm.workStartTime"
@@ -391,6 +453,33 @@ const getServiceName = (serviceId) => {
                 type="email"
                 class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
               />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">Kullanıcı Adı</label>
+              <input
+                v-model="employeeForm.username"
+                type="text"
+                class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">Şifre (Boş bırakırsanız değişmez)</label>
+              <input
+                v-model="employeeForm.password"
+                type="password"
+                placeholder="Yeni şifre girmek isterseniz yazın"
+                class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              />
+            </div>
+            <div class="md:col-span-2">
+              <label class="block text-sm font-medium text-gray-700 mb-2">Fotoğraf URL'si</label>
+              <input
+                v-model="employeeForm.photoUrl"
+                type="url"
+                placeholder="https://example.com/photo.jpg"
+                class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              />
+              <p class="text-xs text-gray-500 mt-1">Fotoğrafın internet adresini girin (opsiyonel)</p>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-2">Başlangıç Saati</label>

@@ -1,72 +1,91 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { supabase } from './supabase'
 import AppointmentList from './components/AppointmentList.vue'
 import AppointmentForm from './components/AppointmentForm.vue'
 import AdminLogin from './components/AdminLogin.vue'
-import BarbersList from './components/BarbersList.vue'
+import CustomAlert from './components/CustomAlert.vue'
+import NotificationToast from './components/NotificationToast.vue'
+import { useAlert, useNotification } from './composables/useAlert'
+import { supabase } from './supabase'
 
 const isAdmin = ref(false)
 const showAdminLogin = ref(false)
 const adminUser = ref(null)
 const loading = ref(true)
 
-onMounted(async () => {
-  // Supabase auth state değişikliklerini dinle
-  const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-    if (event === 'SIGNED_IN' && session) {
-      await checkAdminStatus(session.user.id)
-    } else if (event === 'SIGNED_OUT') {
-      isAdmin.value = false
-      adminUser.value = null
-    }
-  })
+const { alertState, closeAlert, handleConfirm, handleCancel } = useAlert()
+const { notificationState, closeNotification, showSuccessNotification } = useNotification()
 
-  // Sayfa yüklendiğinde mevcut kullanıcıyı kontrol et
-  const { data: { session } } = await supabase.auth.getSession()
-  if (session) {
-    await checkAdminStatus(session.user.id)
-  }
+// Real-time bildirim sistemi
+let appointmentSubscription = null
 
+onMounted(() => {
+  // LocalStorage'dan kullanıcı durumunu kontrol et
+  checkAdminStatus()
   loading.value = false
 
-  // Component unmount olduğunda subscription'ı temizle
-  return () => subscription?.unsubscribe()
+  // Admin için real-time bildirim sistemi
+  if (isAdmin.value) {
+    setupRealtimeNotifications()
+  }
 })
 
-const checkAdminStatus = async (userId) => {
-  try {
-    const { data, error } = await supabase
-      .from('admin_users')
-      .select('*')
-      .eq('auth_id', userId)
-      .eq('is_active', true)
-      .single()
+const setupRealtimeNotifications = () => {
+  // Yeni randevular için real-time subscription
+  appointmentSubscription = supabase
+    .channel('appointments_channel')
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'appointments'
+      },
+      async (payload) => {
+        // Yeni randevu bildirimi
+        const appointment = payload.new
 
-    if (!error && data) {
-      isAdmin.value = true
-      adminUser.value = data
-    } else {
-      isAdmin.value = false
-      adminUser.value = null
-    }
-  } catch (err) {
-    console.error('Admin status kontrolü hatası:', err)
+        // Çalışan ve hizmet bilgilerini al
+        const [employeeData, serviceData] = await Promise.all([
+          supabase.from('employees').select('name').eq('id', appointment.employee_id).single(),
+          supabase.from('services').select('name').eq('id', appointment.service_id).single()
+        ])
+
+        const employeeName = employeeData.data?.name || 'Bilinmeyen'
+        const serviceName = serviceData.data?.name || 'Bilinmeyen'
+        const date = new Date(appointment.appointment_date).toLocaleDateString('tr-TR')
+        const time = appointment.appointment_time.substring(0, 5)
+
+        showSuccessNotification(
+          `${appointment.customer_name} - ${serviceName}\n${employeeName} | ${date} ${time}`,
+          '🔔 Yeni Randevu!'
+        )
+      }
+    )
+    .subscribe()
+}
+
+const checkAdminStatus = () => {
+  const adminStatus = localStorage.getItem('isAdmin')
+  const adminUserData = localStorage.getItem('adminUser')
+
+  if (adminStatus === 'true' && adminUserData) {
+    isAdmin.value = true
+    adminUser.value = JSON.parse(adminUserData)
+  } else {
     isAdmin.value = false
     adminUser.value = null
   }
 }
 
-const handleAdminLogin = async () => {
-  const { data: { session } } = await supabase.auth.getSession()
-  if (session) {
-    await checkAdminStatus(session.user.id)
-  }
+const handleAdminLogin = () => {
+  checkAdminStatus()
   showAdminLogin.value = false
 }
 
-const logout = async () => {
-  await supabase.auth.signOut()
+const logout = () => {
+  localStorage.removeItem('isAdmin')
+  localStorage.removeItem('adminUser')
   isAdmin.value = false
   adminUser.value = null
 }
@@ -77,11 +96,12 @@ const openAdminLogin = () => {
 </script>
 
 <template>
-  <!-- Yönetici Giriş Ekranı -->
-  <AdminLogin v-if="showAdminLogin" @login-success="handleAdminLogin" />
+  <div>
+    <!-- Yönetici Giriş Ekranı -->
+    <AdminLogin v-if="showAdminLogin" @login-success="handleAdminLogin" />
 
-  <!-- Ana Uygulama -->
-  <div v-else class="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50">
+    <!-- Ana Uygulama -->
+    <div v-else class="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50">
     <!-- Header - Mobil Uyumlu -->
     <header class="bg-white shadow-lg sticky top-0 z-50 border-b-2 border-indigo-100">
       <div class="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-3 sm:py-4">
@@ -114,24 +134,27 @@ const openAdminLogin = () => {
               </div>
             </div>
 
-            <!-- Admin kullanıcı bilgisi - Mobile (sadece ikon) -->
+            <!-- Kullanıcı bilgisi - Mobile (sadece ikon) -->
             <div v-if="isAdmin && adminUser" class="lg:hidden flex items-center bg-indigo-50 p-2 rounded-lg">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
               </svg>
             </div>
 
-            <!-- Yönetici Girişi butonu -->
-            <button
-              v-if="!isAdmin"
-              @click="openAdminLogin"
-              class="px-3 py-2 sm:px-4 sm:py-2 rounded-lg font-medium transition-all duration-200 bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:from-indigo-700 hover:to-purple-700 text-xs sm:text-sm shadow-md hover:shadow-lg flex items-center gap-1 sm:gap-2"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-              </svg>
-              <span class="hidden sm:inline">Yönetici</span>
-            </button>
+            <!-- Giriş Butonu - Giriş yapılmamışsa -->
+            <div v-if="!isAdmin">
+              <!-- Yönetici Girişi butonu -->
+              <button
+                @click="openAdminLogin"
+                class="px-3 py-2 sm:px-4 sm:py-2 rounded-lg font-medium transition-all duration-200 bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:from-indigo-700 hover:to-purple-700 text-xs sm:text-sm shadow-md hover:shadow-lg flex items-center gap-1 sm:gap-2"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                <span class="hidden sm:inline">Yönetici Girişi</span>
+                <span class="sm:hidden">Giriş</span>
+              </button>
+            </div>
 
             <!-- Çıkış butonu -->
             <button
@@ -151,15 +174,12 @@ const openAdminLogin = () => {
 
     <!-- Main Content - Mobil Padding -->
     <main class="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 lg:py-8">
-      <!-- Yönetici ise randevu listesini göster -->
-      <AppointmentList v-if="isAdmin" :admin-user="adminUser" />
+      <!-- Yönetici ise tüm randevuları göster -->
+      <AppointmentList v-if="isAdmin" :admin-user="adminUser" :is-admin="true" />
 
-      <!-- Normal kullanıcı ise berberleri ve randevu formunu göster -->
-      <div v-else class="space-y-8">
-        <!-- Berberler Listesi -->
-        <BarbersList />
-
-        <!-- Randevu Alma Formu -->
+      <!-- Normal kullanıcı ise sadece randevu formunu göster -->
+      <div v-else>
+        <!-- Randevu Alma Formu (çalışan seçimi içinde) -->
         <AppointmentForm />
       </div>
     </main>
@@ -169,10 +189,35 @@ const openAdminLogin = () => {
       <div class="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6">
         <div class="text-center">
           <p class="text-xs sm:text-sm text-gray-600">&copy; 2025 Berber Randevu Sistemi</p>
+          <p class="text-xs sm:text-sm text-gray-500 mt-1">Muzaffer Nergiz</p>
           <p class="text-xs text-gray-500 mt-1">Tüm hakları saklıdır</p>
         </div>
       </div>
     </footer>
+    </div>
+
+    <!-- Global Alert Dialog -->
+    <CustomAlert
+      :show="alertState.show"
+      :type="alertState.type"
+      :title="alertState.title"
+      :message="alertState.message"
+      :confirm-text="alertState.confirmText"
+      :cancel-text="alertState.cancelText"
+      @close="closeAlert"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
+
+    <!-- Global Notification Toast -->
+    <NotificationToast
+      :show="notificationState.show"
+      :type="notificationState.type"
+      :title="notificationState.title"
+      :message="notificationState.message"
+      :duration="notificationState.duration"
+      @close="closeNotification"
+    />
   </div>
 </template>
 

@@ -1,132 +1,324 @@
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { supabase } from '../supabase'
+import { useAlert } from '../composables/useAlert'
 
-const emit = defineEmits(['appointment-created', 'cancel'])
+const { showWarning, showSuccess, showError } = useAlert()
 
-// Form verileri
-const formData = ref({
-  employee_id: '',
-  service_id: '',
-  appointment_date: new Date().toISOString().split('T')[0],
-  appointment_time: '',
-  customer_name: '',
-  customer_phone: '',
-  customer_email: '',
-  notes: ''
-})
+// Adım takibi
+const currentStep = ref(1)
+const totalSteps = 4
 
-// Yardımcı state'ler
+// Veri
 const employees = ref([])
 const services = ref([])
-const availableTimeSlots = ref([])
+const employeeServices = ref([])
+const workingDays = ref([])
+const timeOffs = ref([])
+
+// Seçimler
+const selectedEmployeeId = ref(null)
+const selectedServices = ref([]) // Birden fazla hizmet için array
+const selectedDate = ref('')
+const selectedTime = ref('')
+
+// Form verileri
+const customerName = ref('')
+const customerPhone = ref('')
+const customerNotes = ref('')
+
+// Durum
 const loading = ref(false)
-const loadingSlots = ref(false)
 const error = ref(null)
-const existingAppointments = ref([])
+const availableTimes = ref([])
 
 onMounted(async () => {
-  await fetchInitialData()
+  await fetchEmployees()
+  await fetchServices()
 })
 
-// Tarih veya çalışan değiştiğinde saat dilimlerini yeniden yükle
-watch(
-  () => [formData.value.appointment_date, formData.value.employee_id],
-  async ([date, employeeId]) => {
-    if (date && employeeId) {
-      await fetchAvailableTimeSlots()
-    }
-  }
-)
+// Seçili çalışan bilgisi
+const selectedEmployeeData = computed(() => {
+  return employees.value.find(e => e.id === selectedEmployeeId.value)
+})
 
-const fetchInitialData = async () => {
+// Toplam süre (dakika)
+const totalDuration = computed(() => {
+  return selectedServices.value.reduce((total, service) => total + (service.duration || 0), 0)
+})
+
+// Toplam fiyat
+const totalPrice = computed(() => {
+  return selectedServices.value.reduce((total, service) => total + (service.price || 0), 0)
+})
+
+// Minimum tarih (bugün)
+const minDate = computed(() => {
+  return new Date().toISOString().split('T')[0]
+})
+
+// Maksimum tarih (60 gün sonra)
+const maxDate = computed(() => {
+  const date = new Date()
+  date.setDate(date.getDate() + 60)
+  return date.toISOString().split('T')[0]
+})
+
+// Çalışanları yükle
+const fetchEmployees = async () => {
+  try {
+    const { data, error: fetchError } = await supabase
+      .from('employees')
+      .select('*')
+      .eq('is_active', true)
+      .order('name', { ascending: true })
+
+    if (fetchError) throw fetchError
+    employees.value = data || []
+  } catch (err) {
+    console.error('Çalışanlar yüklenirken hata:', err)
+  }
+}
+
+// Hizmetleri yükle
+const fetchServices = async () => {
+  try {
+    const { data, error: fetchError } = await supabase
+      .from('services')
+      .select('*')
+      .order('name', { ascending: true })
+
+    if (fetchError) throw fetchError
+    services.value = data || []
+  } catch (err) {
+    console.error('Hizmetler yüklenirken hata:', err)
+  }
+}
+
+// Çalışanın hizmetlerini yükle
+const fetchEmployeeServices = async (employeeId) => {
+  try {
+    const { data, error: fetchError } = await supabase
+      .from('employee_services')
+      .select(`
+        service_id,
+        services (id, name, price, duration, description)
+      `)
+      .eq('employee_id', employeeId)
+
+    if (fetchError) throw fetchError
+    employeeServices.value = data?.map(s => s.services) || []
+  } catch (err) {
+    console.error('Çalışan hizmetleri yüklenirken hata:', err)
+  }
+}
+
+// Çalışanın çalışma günlerini yükle
+const fetchWorkingDays = async (employeeId) => {
+  try {
+    const { data, error: fetchError } = await supabase
+      .from('employee_working_days')
+      .select('*')
+      .eq('employee_id', employeeId)
+      .eq('is_active', true)
+
+    if (fetchError) throw fetchError
+    workingDays.value = data || []
+  } catch (err) {
+    console.error('Çalışma günleri yüklenirken hata:', err)
+    // Eğer tablo yoksa, varsayılan değerler kullan
+    workingDays.value = []
+  }
+}
+
+// Çalışanın tatil günlerini yükle
+const fetchTimeOffs = async (employeeId) => {
+  try {
+    const { data, error: fetchError } = await supabase
+      .from('employee_time_off')
+      .select('*')
+      .eq('employee_id', employeeId)
+
+    if (fetchError) throw fetchError
+    timeOffs.value = data || []
+  } catch (err) {
+    console.error('Tatil günleri yüklenirken hata:', err)
+    timeOffs.value = []
+  }
+}
+
+// Çalışan seçildiğinde
+const selectEmployee = async (employeeId) => {
+  selectedEmployeeId.value = employeeId
+  await fetchEmployeeServices(employeeId)
+  nextStep()
+}
+
+// Hizmet seçimi/seçimi kaldırma (toggle) - Birden fazla hizmet için
+const toggleService = (service) => {
+  const index = selectedServices.value.findIndex(s => s.id === service.id)
+  if (index > -1) {
+    // Hizmet zaten seçili, kaldır
+    selectedServices.value.splice(index, 1)
+  } else {
+    // Hizmeti ekle
+    selectedServices.value.push(service)
+  }
+}
+
+// Hizmet seçimini tamamla ve sonraki adıma geç
+const confirmServices = async () => {
+  if (selectedServices.value.length === 0) {
+    await showWarning('Devam etmek için en az bir hizmet seçmeniz gerekmektedir.', 'Hizmet Seçimi')
+    return
+  }
+  await fetchWorkingDays(selectedEmployeeId.value)
+  await fetchTimeOffs(selectedEmployeeId.value)
+  nextStep()
+}
+
+// Hizmet seçili mi kontrol et
+const isServiceSelected = (serviceId) => {
+  return selectedServices.value.some(s => s.id === serviceId)
+}
+
+// Tarih seçildiğinde
+const onDateSelect = async () => {
+  if (!selectedDate.value) return
+  await calculateAvailableTimes()
+}
+
+// Müsait saatleri hesapla
+const calculateAvailableTimes = async () => {
+  if (!selectedDate.value || !selectedEmployeeId.value || selectedServices.value.length === 0) return
+
   try {
     loading.value = true
-    error.value = null
 
-    const [
-      { data: employeesData, error: employeesError },
-      { data: servicesData, error: servicesError }
-    ] = await Promise.all([
-      supabase.from('employees').select('*').eq('is_active', true),
-      supabase.from('services').select('*')
-    ])
+    // Seçilen tarihin gün indexini al
+    const date = new Date(selectedDate.value + 'T00:00:00')
+    const dayOfWeek = date.getDay()
 
-    if (employeesError) throw employeesError
-    if (servicesError) throw servicesError
+    // Bu günde çalışıyor mu?
+    const workingDay = workingDays.value.find(wd => wd.day_of_week === dayOfWeek)
 
-    employees.value = employeesData || []
-    services.value = servicesData || []
+    // Eğer çalışma günü bulunamadıysa, varsayılan saatler kullan
+    let startTime = '09:00'
+    let endTime = '19:00'
+
+    if (workingDay) {
+      startTime = workingDay.start_time
+      endTime = workingDay.end_time
+    } else if (dayOfWeek === 0) {
+      // Pazar günü çalışmıyor
+      availableTimes.value = []
+      loading.value = false
+      return
+    }
+
+    // Tatilde mi?
+    const isTimeOff = timeOffs.value.some(to => to.date === selectedDate.value && to.is_full_day)
+    if (isTimeOff) {
+      availableTimes.value = []
+      loading.value = false
+      return
+    }
+
+    // Mevcut randevuları çek
+    const { data: existingAppointments, error: aptError } = await supabase
+      .from('appointments')
+      .select('appointment_time, service_id, services(duration)')
+      .eq('employee_id', selectedEmployeeId.value)
+      .eq('appointment_date', selectedDate.value)
+      .in('status', ['pending', 'confirmed'])
+
+    if (aptError) throw aptError
+
+    // Çalışma saatlerini parse et
+    const [startHour, startMinute] = startTime.split(':').map(Number)
+    const [endHour, endMinute] = endTime.split(':').map(Number)
+
+    // Tüm olası saatleri oluştur (30 dakika aralıklar)
+    const times = []
+    let currentHour = startHour
+    let currentMinute = startMinute
+
+    while (currentHour < endHour || (currentHour === endHour && currentMinute < endMinute)) {
+      const timeStr = `${currentHour.toString().padStart(2, '0')}:${currentMinute.toString().padStart(2, '0')}`
+
+      // Bu saat müsait mi kontrol et - toplam süreyi kullan
+      const isAvailable = !existingAppointments?.some(apt => {
+        const aptTime = apt.appointment_time.substring(0, 5)
+        const aptDuration = apt.services?.duration || 30
+
+        const [aptHour, aptMinute] = aptTime.split(':').map(Number)
+        const aptStart = aptHour * 60 + aptMinute
+        const aptEnd = aptStart + aptDuration
+
+        const checkTime = currentHour * 60 + currentMinute
+        const checkEnd = checkTime + totalDuration.value
+
+        return (checkTime < aptEnd && checkEnd > aptStart)
+      })
+
+      if (isAvailable) {
+        times.push(timeStr)
+      }
+
+      // 30 dakika ekle
+      currentMinute += 30
+      if (currentMinute >= 60) {
+        currentHour++
+        currentMinute = 0
+      }
+    }
+
+    availableTimes.value = times
   } catch (err) {
+    console.error('Müsait saatler hesaplanırken hata:', err)
     error.value = err.message
-    console.error('Veri yükleme hatası:', err)
   } finally {
     loading.value = false
   }
 }
 
-const fetchAvailableTimeSlots = async () => {
-  try {
-    loadingSlots.value = true
+// Saat seçildiğinde
+const selectTime = (time) => {
+  selectedTime.value = time
+  nextStep()
+}
 
-    // Seçilen çalışan ve tarihe ait randevuları al
-    const { data, error: appointmentsError } = await supabase
-      .from('appointments')
-      .select('appointment_time')
-      .eq('employee_id', formData.value.employee_id)
-      .eq('appointment_date', formData.value.appointment_date)
-      .neq('status', 'cancelled')
-
-    if (appointmentsError) throw appointmentsError
-
-    existingAppointments.value = data || []
-
-    // Saat dilimlerini oluştur (09:00 - 19:00 arası, 30'ar dakika)
-    const slots = []
-    const startHour = 9
-    const endHour = 19
-
-    for (let hour = startHour; hour < endHour; hour++) {
-      for (let minute of [0, 30]) {
-        const timeStr = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}:00`
-        const isBooked = existingAppointments.value.some(
-          apt => apt.appointment_time === timeStr
-        )
-
-        slots.push({
-          time: timeStr,
-          display: timeStr.substring(0, 5), // HH:MM formatı
-          available: !isBooked
-        })
-      }
-    }
-
-    availableTimeSlots.value = slots
-  } catch (err) {
-    console.error('Saat dilimleri yükleme hatası:', err)
-  } finally {
-    loadingSlots.value = false
+// Sonraki adım
+const nextStep = () => {
+  if (currentStep.value < totalSteps) {
+    currentStep.value++
   }
 }
 
-const selectedService = computed(() => {
-  return services.value.find(s => s.id === formData.value.service_id)
-})
+// Önceki adım
+const prevStep = () => {
+  if (currentStep.value > 1) {
+    currentStep.value--
+  }
+}
 
-const isFormValid = computed(() => {
-  return (
-    formData.value.employee_id &&
-    formData.value.service_id &&
-    formData.value.appointment_date &&
-    formData.value.appointment_time &&
-    formData.value.customer_name.trim() &&
-    formData.value.customer_phone.trim()
-  )
-})
+// Formu sıfırla
+const resetForm = () => {
+  currentStep.value = 1
+  selectedEmployeeId.value = null
+  selectedServices.value = []
+  selectedDate.value = ''
+  selectedTime.value = ''
+  customerName.value = ''
+  customerPhone.value = ''
+  customerNotes.value = ''
+  error.value = null
+}
 
-const submitForm = async () => {
-  if (!isFormValid.value) {
-    alert('Lütfen tüm gerekli alanları doldurun!')
+// Randevuyu kaydet - Birden fazla hizmet için ard arda saatlerde randevular oluştur
+const submitAppointment = async () => {
+  if (!customerName.value || !customerPhone.value) {
+    await showWarning('Randevu oluşturmak için lütfen adınızı ve telefon numaranızı girin.', 'Eksik Bilgi')
     return
   }
 
@@ -134,311 +326,405 @@ const submitForm = async () => {
     loading.value = true
     error.value = null
 
-    // Randevu oluştur (müşteri bilgileri direkt kaydediliyor)
-    const { data: appointment, error: appointmentError } = await supabase
-      .from('appointments')
-      .insert({
-        employee_id: formData.value.employee_id,
-        service_id: formData.value.service_id,
-        appointment_date: formData.value.appointment_date,
-        appointment_time: formData.value.appointment_time,
-        customer_name: formData.value.customer_name,
-        customer_phone: formData.value.customer_phone,
-        customer_email: formData.value.customer_email || null,
-        notes: formData.value.notes || null,
+    // Her hizmet için ard arda saatlerde randevu oluştur
+    const appointments = []
+    let currentTime = selectedTime.value
+
+    for (const service of selectedServices.value) {
+      // Saat ve dakikayı parse et
+      const [hours, minutes] = currentTime.split(':').map(Number)
+
+      appointments.push({
+        employee_id: selectedEmployeeId.value,
+        service_id: service.id,
+        appointment_date: selectedDate.value,
+        appointment_time: `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:00`,
+        customer_name: customerName.value,
+        customer_phone: customerPhone.value,
+        notes: customerNotes.value,
         status: 'pending'
       })
-      .select()
-      .single()
 
-    if (appointmentError) {
-      // Çakışma hatası kontrolü
-      if (appointmentError.code === '23505') {
-        throw new Error('Bu saat dilimi dolu! Lütfen başka bir saat seçin.')
-      }
-      throw appointmentError
+      // Bir sonraki hizmet için saati hesapla (hizmet süresi kadar ilerlet)
+      const totalMinutes = hours * 60 + minutes + service.duration
+      const nextHours = Math.floor(totalMinutes / 60)
+      const nextMinutes = totalMinutes % 60
+      currentTime = `${nextHours.toString().padStart(2, '0')}:${nextMinutes.toString().padStart(2, '0')}`
     }
 
-    alert('Randevunuz başarıyla oluşturuldu!')
-    emit('appointment-created', appointment)
+    const { error: insertError } = await supabase
+      .from('appointments')
+      .insert(appointments)
+
+    if (insertError) throw insertError
+
+    await showSuccess(
+      `${selectedServices.value.length} hizmet için randevunuz başarıyla oluşturuldu!\n\nRandevunuz en kısa sürede onaylanacak ve size bilgi verilecektir.`,
+      '✅ Randevu Oluşturuldu'
+    )
+    resetForm()
   } catch (err) {
-    error.value = err.message
-    alert('Randevu oluşturulurken bir hata oluştu: ' + err.message)
+    console.error('Randevu kaydedilirken hata:', err)
+    await showError(
+      `Randevu oluşturulurken bir hata meydana geldi.\n\nHata: ${err.message}\n\nLütfen tekrar deneyin veya bizimle iletişime geçin.`,
+      'Randevu Hatası'
+    )
   } finally {
     loading.value = false
   }
 }
 
-const resetForm = () => {
-  formData.value = {
-    employee_id: '',
-    service_id: '',
-    appointment_date: new Date().toISOString().split('T')[0],
-    appointment_time: '',
-    customer_name: '',
-    customer_phone: '',
-    customer_email: '',
-    notes: ''
-  }
-  availableTimeSlots.value = []
+// Tarih formatla
+const formatDate = (dateStr) => {
+  const date = new Date(dateStr + 'T00:00:00')
+  return date.toLocaleDateString('tr-TR', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  })
 }
 </script>
 
 <template>
-  <div class="bg-white rounded-xl shadow-2xl p-4 sm:p-6 lg:p-8 border border-indigo-100">
-    <!-- Başlık -->
-    <div class="mb-6 sm:mb-8 text-center sm:text-left">
-      <div class="flex items-center justify-center sm:justify-start gap-3 mb-3">
-        <div class="bg-gradient-to-br from-indigo-500 to-purple-600 p-2 sm:p-3 rounded-xl shadow-lg">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 sm:h-7 sm:w-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-          </svg>
+  <div id="appointment-form" class="bg-white rounded-xl shadow-lg p-6 md:p-8">
+    <!-- İlerleme Çubuğu -->
+    <div class="mb-8">
+      <div class="flex items-center justify-between mb-4">
+        <div
+          v-for="step in totalSteps"
+          :key="step"
+          class="flex items-center"
+          :class="{ 'flex-1': step < totalSteps }"
+        >
+          <div
+            class="flex items-center justify-center w-10 h-10 rounded-full font-bold transition-all"
+            :class="
+              currentStep >= step
+                ? 'bg-indigo-600 text-white'
+                : 'bg-gray-200 text-gray-600'
+            "
+          >
+            {{ step }}
+          </div>
+          <div
+            v-if="step < totalSteps"
+            class="flex-1 h-1 mx-2 transition-all"
+            :class="currentStep > step ? 'bg-indigo-600' : 'bg-gray-200'"
+          ></div>
         </div>
-        <h2 class="text-xl sm:text-2xl lg:text-3xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
-          Randevu Al
-        </h2>
       </div>
-      <p class="text-sm sm:text-base text-gray-600">Lütfen aşağıdaki formu doldurun</p>
+      <div class="text-center">
+        <h2 class="text-2xl font-bold text-gray-900">
+          <span v-if="currentStep === 1">Çalışan Seçimi</span>
+          <span v-else-if="currentStep === 2">Hizmet Seçimi</span>
+          <span v-else-if="currentStep === 3">Tarih ve Saat Seçimi</span>
+          <span v-else-if="currentStep === 4">İletişim Bilgileri</span>
+        </h2>
+        <p class="text-gray-600 mt-1">Adım {{ currentStep }} / {{ totalSteps }}</p>
+      </div>
     </div>
 
-    <form @submit.prevent="submitForm" class="space-y-5 sm:space-y-6">
-      <!-- Çalışan Seçimi -->
-      <div class="bg-gradient-to-br from-indigo-50 to-purple-50 p-4 sm:p-5 rounded-xl border border-indigo-100">
-        <label class="flex items-center gap-2 text-sm sm:text-base font-semibold text-gray-800 mb-3 sm:mb-4">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-          </svg>
-          Berber Seçin <span class="text-red-500">*</span>
-        </label>
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-3">
-          <div
-            v-for="employee in employees"
-            :key="employee.id"
-            @click="formData.employee_id = employee.id"
-            :class="[
-              'p-3 sm:p-4 border-2 rounded-xl cursor-pointer transition-all duration-200 hover:scale-105',
-              formData.employee_id === employee.id
-                ? 'border-indigo-600 bg-white shadow-lg ring-2 ring-indigo-200'
-                : 'border-gray-200 bg-white hover:border-indigo-300 shadow-sm hover:shadow-md'
-            ]"
-          >
-            <div class="flex items-center gap-2 mb-1">
-              <div :class="[
-                'w-2 h-2 rounded-full',
-                formData.employee_id === employee.id ? 'bg-indigo-600' : 'bg-gray-300'
-              ]"></div>
-              <p class="font-semibold text-sm sm:text-base text-gray-900">{{ employee.name }}</p>
+    <!-- Adım 1: Çalışan Seçimi -->
+    <div v-if="currentStep === 1" class="space-y-6">
+      <!-- Başlık -->
+      <div class="text-center">
+        <h2 class="text-3xl font-bold text-gray-900 mb-2">Çalışanlarımız</h2>
+        <p class="text-gray-600">Randevu almak istediğiniz çalışanı seçin</p>
+      </div>
+
+      <!-- Çalışanlar Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div
+          v-for="employee in employees"
+          :key="employee.id"
+          @click="selectEmployee(employee.id)"
+          class="bg-white rounded-xl shadow-md hover:shadow-xl transition-all duration-300 cursor-pointer transform hover:-translate-y-1 overflow-hidden border-2 border-transparent hover:border-indigo-500"
+        >
+          <!-- Fotoğraf Alanı -->
+          <div class="h-48 bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center relative overflow-hidden">
+            <!-- Gerçek fotoğraf varsa göster -->
+            <img
+              v-if="employee.photo_url"
+              :src="employee.photo_url"
+              :alt="employee.name"
+              class="w-full h-full object-cover"
+              @error="(e) => e.target.style.display = 'none'"
+            />
+            <!-- Fotoğraf yoksa veya yüklenemezse placeholder -->
+            <div
+              v-if="!employee.photo_url"
+              class="w-32 h-32 rounded-full bg-white flex items-center justify-center shadow-lg z-10"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-20 w-20 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+              </svg>
             </div>
-            <p class="text-xs sm:text-sm text-gray-600 ml-4">{{ employee.specialty }}</p>
+          </div>
+
+          <!-- Bilgiler -->
+          <div class="p-6 text-center">
+            <h3 class="text-xl font-bold text-gray-900 mb-2">{{ employee.name }}</h3>
+            <p class="text-indigo-600 font-medium mb-3">{{ employee.specialty || 'Uzman' }}</p>
+
+            <!-- Çalışma Saatleri -->
+            <div v-if="employee.work_start_time && employee.work_end_time" class="text-sm text-gray-600">
+              <p class="flex items-center justify-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                {{ employee.work_start_time.substring(0, 5) }} - {{ employee.work_end_time.substring(0, 5) }}
+              </p>
+            </div>
           </div>
         </div>
       </div>
 
-      <!-- Hizmet Seçimi -->
-      <div class="bg-gradient-to-br from-purple-50 to-pink-50 p-4 sm:p-5 rounded-xl border border-purple-100">
-        <label class="flex items-center gap-2 text-sm sm:text-base font-semibold text-gray-800 mb-3 sm:mb-4">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" />
-          </svg>
-          Hizmet Seçin <span class="text-red-500">*</span>
-        </label>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
-          <div
-            v-for="service in services"
+      <!-- Boş Durum -->
+      <div v-if="employees.length === 0" class="text-center py-12 bg-gray-50 rounded-lg">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 mx-auto text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+        </svg>
+        <p class="mt-4 text-lg text-gray-600">Şu anda aktif çalışan bulunmamaktadır</p>
+      </div>
+    </div>
+
+    <!-- Adım 2: Hizmet Seçimi (Birden fazla seçilebilir) -->
+    <div v-if="currentStep === 2" class="space-y-4">
+      <p class="text-gray-600 text-center mb-2">
+        <span class="font-semibold">{{ selectedEmployeeData?.name }}</span> için hizmet seçin
+      </p>
+      <p class="text-sm text-indigo-600 text-center mb-6">
+        Birden fazla hizmet seçebilirsiniz
+      </p>
+
+      <!-- Seçili hizmetler özeti -->
+      <div v-if="selectedServices.length > 0" class="bg-indigo-50 p-4 rounded-lg mb-4">
+        <p class="text-sm font-semibold text-gray-900 mb-2">Seçili Hizmetler:</p>
+        <div class="flex flex-wrap gap-2 mb-2">
+          <span
+            v-for="service in selectedServices"
             :key="service.id"
-            @click="formData.service_id = service.id"
-            :class="[
-              'p-3 sm:p-4 border-2 rounded-xl cursor-pointer transition-all duration-200 hover:scale-105',
-              formData.service_id === service.id
-                ? 'border-purple-600 bg-white shadow-lg ring-2 ring-purple-200'
-                : 'border-gray-200 bg-white hover:border-purple-300 shadow-sm hover:shadow-md'
-            ]"
+            class="px-3 py-1 bg-indigo-600 text-white rounded-full text-sm font-medium"
           >
-            <div class="flex items-center justify-between mb-2">
-              <div class="flex items-center gap-2">
-                <div :class="[
-                  'w-2 h-2 rounded-full',
-                  formData.service_id === service.id ? 'bg-purple-600' : 'bg-gray-300'
-                ]"></div>
-                <p class="font-semibold text-sm sm:text-base text-gray-900">{{ service.name }}</p>
+            {{ service.name }}
+          </span>
+        </div>
+        <div class="flex justify-between text-sm mt-3 pt-3 border-t border-indigo-200">
+          <span class="text-gray-700">Toplam Süre: <strong>{{ totalDuration }} dakika</strong></span>
+          <span class="text-indigo-700 font-bold">Toplam: {{ totalPrice }} TL</span>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div
+          v-for="service in employeeServices"
+          :key="service.id"
+          @click="toggleService(service)"
+          class="p-4 border-2 rounded-lg cursor-pointer transition-all text-left"
+          :class="isServiceSelected(service.id)
+            ? 'border-indigo-600 bg-indigo-50'
+            : 'border-gray-200 hover:border-indigo-300 hover:bg-gray-50'"
+        >
+          <div class="flex items-start justify-between">
+            <div class="flex-1">
+              <h3 class="font-bold text-lg text-gray-900">{{ service.name }}</h3>
+              <div class="flex items-center justify-between mt-2 text-sm">
+                <span class="text-gray-600">{{ service.duration }} dakika</span>
+                <span class="text-indigo-600 font-semibold">{{ service.price }} TL</span>
               </div>
-              <div class="flex items-center gap-1 bg-gradient-to-r from-purple-600 to-pink-600 text-white px-2 sm:px-3 py-1 rounded-full">
-                <span class="text-sm sm:text-lg font-bold">{{ service.price }}</span>
-                <span class="text-xs">₺</span>
+              <p v-if="service.description" class="text-gray-500 text-sm mt-2">{{ service.description }}</p>
+            </div>
+            <div class="ml-3">
+              <div
+                class="w-6 h-6 rounded border-2 flex items-center justify-center transition-all"
+                :class="isServiceSelected(service.id)
+                  ? 'bg-indigo-600 border-indigo-600'
+                  : 'border-gray-300'"
+              >
+                <svg
+                  v-if="isServiceSelected(service.id)"
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="h-4 w-4 text-white"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+                </svg>
               </div>
             </div>
-            <div class="flex items-center gap-2 text-xs sm:text-sm text-gray-600 ml-4">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              {{ service.duration }} dakika
-            </div>
-            <p v-if="service.description" class="text-xs sm:text-sm text-gray-500 mt-2 ml-4 line-clamp-2">
-              {{ service.description }}
-            </p>
           </div>
+        </div>
+      </div>
+
+      <div class="flex justify-between mt-6">
+        <button
+          @click="prevStep"
+          class="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+        >
+          Geri
+        </button>
+        <button
+          @click="confirmServices"
+          :disabled="selectedServices.length === 0"
+          class="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Devam Et ({{ selectedServices.length }} hizmet)
+        </button>
+      </div>
+    </div>
+
+    <!-- Adım 3: Tarih ve Saat Seçimi -->
+    <div v-if="currentStep === 3" class="space-y-6">
+      <div class="bg-indigo-50 p-4 rounded-lg">
+        <p class="text-sm text-gray-700 mb-2">
+          <span class="font-semibold">Çalışan:</span> {{ selectedEmployeeData?.name }}
+        </p>
+        <p class="text-sm text-gray-700 mb-2">
+          <span class="font-semibold">Hizmetler:</span>
+          <span v-for="(service, index) in selectedServices" :key="service.id">
+            {{ service.name }}<span v-if="index < selectedServices.length - 1">, </span>
+          </span>
+        </p>
+        <div class="flex justify-between text-sm mt-3 pt-3 border-t border-indigo-200">
+          <span class="text-gray-700">Toplam Süre: <strong>{{ totalDuration }} dakika</strong></span>
+          <span class="text-indigo-700 font-bold">Toplam: {{ totalPrice }} TL</span>
         </div>
       </div>
 
       <!-- Tarih Seçimi -->
-      <div class="bg-gradient-to-br from-blue-50 to-indigo-50 p-4 sm:p-5 rounded-xl border border-blue-100">
-        <label class="flex items-center gap-2 text-sm sm:text-base font-semibold text-gray-800 mb-3">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-          </svg>
-          Tarih Seçin <span class="text-red-500">*</span>
-        </label>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2">Tarih Seçin</label>
         <input
-          v-model="formData.appointment_date"
+          v-model="selectedDate"
+          @change="onDateSelect"
           type="date"
-          required
-          :min="new Date().toISOString().split('T')[0]"
-          class="w-full px-3 sm:px-4 py-2 sm:py-3 text-sm sm:text-base border-2 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all bg-white shadow-sm"
+          :min="minDate"
+          :max="maxDate"
+          class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
         />
+        <p v-if="selectedDate" class="text-sm text-gray-600 mt-2">
+          {{ formatDate(selectedDate) }}
+        </p>
       </div>
 
       <!-- Saat Seçimi -->
-      <div v-if="formData.appointment_date && formData.employee_id" class="bg-gradient-to-br from-green-50 to-emerald-50 p-4 sm:p-5 rounded-xl border border-green-100">
-        <label class="flex items-center gap-2 text-sm sm:text-base font-semibold text-gray-800 mb-3">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          Saat Seçin <span class="text-red-500">*</span>
-        </label>
-
-        <div v-if="loadingSlots" class="text-center py-8 sm:py-12">
-          <div class="inline-block animate-spin rounded-full h-10 w-10 sm:h-12 sm:w-12 border-4 border-green-200 border-t-green-600"></div>
-          <p class="mt-3 sm:mt-4 text-sm sm:text-base text-gray-600 font-medium">Müsait saatler yükleniyor...</p>
+      <div v-if="selectedDate">
+        <label class="block text-sm font-medium text-gray-700 mb-2">Saat Seçin</label>
+        <div v-if="loading" class="text-center py-8">
+          <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+          <p class="text-gray-600 mt-2">Müsait saatler yükleniyor...</p>
         </div>
-
-        <div v-else class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-2">
+        <div v-else-if="availableTimes.length === 0" class="text-center py-8 bg-red-50 rounded-lg">
+          <p class="text-red-800">Bu tarihte müsait saat bulunmamaktadır.</p>
+          <p class="text-red-600 text-sm mt-2">Lütfen başka bir tarih seçin.</p>
+        </div>
+        <div v-else class="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
           <button
-            v-for="slot in availableTimeSlots"
-            :key="slot.time"
-            type="button"
-            @click="formData.appointment_time = slot.time"
-            :disabled="!slot.available"
-            :class="[
-              'py-2 sm:py-3 px-2 rounded-lg font-semibold transition-all duration-200 text-xs sm:text-sm relative overflow-hidden',
-              !slot.available
-                ? 'bg-gray-100 text-gray-400 cursor-not-allowed opacity-50'
-                : formData.appointment_time === slot.time
-                ? 'bg-gradient-to-br from-green-500 to-emerald-600 text-white shadow-lg scale-105 ring-2 ring-green-300'
-                : 'bg-white border-2 border-gray-200 text-gray-700 hover:border-green-400 hover:shadow-md hover:scale-105'
-            ]"
+            v-for="time in availableTimes"
+            :key="time"
+            @click="selectTime(time)"
+            class="px-4 py-3 border-2 border-gray-200 rounded-lg hover:border-indigo-500 hover:bg-indigo-50 transition-all font-semibold text-gray-900"
           >
-            <span class="relative z-10">{{ slot.display }}</span>
-            <span v-if="!slot.available" class="block text-[10px] sm:text-xs mt-0.5 font-normal">Dolu</span>
-            <svg v-if="formData.appointment_time === slot.time" xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 sm:h-4 sm:w-4 absolute top-1 right-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-            </svg>
+            {{ time }}
           </button>
-        </div>
-
-        <div class="mt-4 flex flex-wrap items-center gap-3 sm:gap-4 text-xs sm:text-sm">
-          <div class="flex items-center gap-2">
-            <span class="w-3 h-3 sm:w-4 sm:h-4 bg-gray-100 rounded border border-gray-300"></span>
-            <span class="text-gray-600">Dolu</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <span class="w-3 h-3 sm:w-4 sm:w-4 bg-white rounded border-2 border-gray-200"></span>
-            <span class="text-gray-600">Müsait</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <span class="w-3 h-3 sm:w-4 sm:h-4 bg-gradient-to-br from-green-500 to-emerald-600 rounded"></span>
-            <span class="text-gray-600">Seçili</span>
-          </div>
         </div>
       </div>
 
-      <!-- Müşteri Bilgileri -->
-      <div class="border-t pt-6">
-        <h3 class="text-lg font-semibold text-gray-900 mb-4">İletişim Bilgileri</h3>
+      <div class="flex justify-between mt-6">
+        <button
+          @click="prevStep"
+          class="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+        >
+          Geri
+        </button>
+      </div>
+    </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">
-              Adınız Soyadınız <span class="text-red-500">*</span>
-            </label>
-            <input
-              v-model="formData.customer_name"
-              type="text"
-              required
-              placeholder="Örn: Ahmet Yılmaz"
-              class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-            />
-          </div>
-
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">
-              Telefon Numarası <span class="text-red-500">*</span>
-            </label>
-            <input
-              v-model="formData.customer_phone"
-              type="tel"
-              required
-              placeholder="Örn: 0532 123 4567"
-              class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-            />
-          </div>
+    <!-- Adım 4: İletişim Bilgileri -->
+    <div v-if="currentStep === 4" class="space-y-6">
+      <!-- Özet -->
+      <div class="bg-indigo-50 p-6 rounded-lg space-y-2">
+        <h3 class="font-bold text-lg text-gray-900 mb-3">Randevu Özeti</h3>
+        <p class="text-sm text-gray-700">
+          <span class="font-semibold">Çalışan:</span> {{ selectedEmployeeData?.name }}
+        </p>
+        <div class="text-sm text-gray-700">
+          <span class="font-semibold">Hizmetler:</span>
+          <ul class="ml-5 mt-2 space-y-1">
+            <li v-for="service in selectedServices" :key="service.id" class="flex justify-between">
+              <span>• {{ service.name }}</span>
+              <span class="text-indigo-600 font-medium">{{ service.price }} TL</span>
+            </li>
+          </ul>
         </div>
+        <p class="text-sm text-gray-700">
+          <span class="font-semibold">Tarih:</span> {{ formatDate(selectedDate) }}
+        </p>
+        <p class="text-sm text-gray-700">
+          <span class="font-semibold">Saat:</span> {{ selectedTime }}
+        </p>
+        <p class="text-sm text-gray-700">
+          <span class="font-semibold">Toplam Süre:</span> {{ totalDuration }} dakika
+        </p>
+        <p class="text-lg font-bold text-indigo-600 mt-3 pt-3 border-t border-indigo-200">
+          Toplam Tutar: {{ totalPrice }} TL
+        </p>
+      </div>
 
-        <div class="mt-6">
-          <label class="block text-sm font-medium text-gray-700 mb-2">
-            E-posta (İsteğe bağlı)
-          </label>
+      <!-- İletişim Formu -->
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Ad Soyad *</label>
           <input
-            v-model="formData.customer_email"
-            type="email"
-            placeholder="Örn: ornek@email.com"
+            v-model="customerName"
+            type="text"
+            placeholder="Adınız ve soyadınız"
+            required
             class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           />
         </div>
 
-        <div class="mt-6">
-          <label class="block text-sm font-medium text-gray-700 mb-2">
-            Notlar (İsteğe bağlı)
-          </label>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Telefon *</label>
+          <input
+            v-model="customerPhone"
+            type="tel"
+            placeholder="0555 555 55 55"
+            required
+            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+          />
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Not (Opsiyonel)</label>
           <textarea
-            v-model="formData.notes"
+            v-model="customerNotes"
             rows="3"
-            placeholder="Randevunuzla ilgili özel bir notunuz varsa yazabilirsiniz..."
+            placeholder="Randevunuz hakkında eklemek istediğiniz notlar..."
             class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           ></textarea>
         </div>
       </div>
 
-      <!-- Özet -->
-      <div v-if="isFormValid" class="bg-indigo-50 border border-indigo-200 rounded-lg p-4">
-        <h4 class="font-semibold text-gray-900 mb-2">Randevu Özeti</h4>
-        <div class="space-y-1 text-sm">
-          <p><span class="font-medium">Hizmet:</span> {{ selectedService?.name }} ({{ selectedService?.price }} ₺)</p>
-          <p><span class="font-medium">Tarih:</span> {{ new Date(formData.appointment_date).toLocaleDateString('tr-TR') }}</p>
-          <p><span class="font-medium">Saat:</span> {{ formData.appointment_time.substring(0, 5) }}</p>
-        </div>
-      </div>
-
-      <!-- Hata Mesajı -->
-      <div v-if="error" class="bg-red-50 border border-red-200 rounded-lg p-4 text-red-800">
-        {{ error }}
-      </div>
-
       <!-- Butonlar -->
-      <div>
+      <div class="flex justify-between mt-6">
         <button
-          type="submit"
-          :disabled="!isFormValid || loading"
-          :class="[
-            'w-full py-3 px-6 rounded-lg font-medium transition-all',
-            isFormValid && !loading
-              ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-          ]"
+          @click="prevStep"
+          class="px-6 py-3 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
         >
-          <span v-if="loading">Oluşturuluyor...</span>
-          <span v-else>Randevu Oluştur</span>
+          Geri
+        </button>
+        <button
+          @click="submitAppointment"
+          :disabled="loading"
+          class="px-8 py-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg hover:from-indigo-700 hover:to-purple-700 transition-all shadow-md hover:shadow-lg disabled:opacity-50 font-semibold"
+        >
+          <span v-if="loading">Kaydediliyor...</span>
+          <span v-else>Randevuyu Onayla</span>
         </button>
       </div>
-    </form>
+    </div>
   </div>
 </template>
